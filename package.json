@@ -1,0 +1,39 @@
+{
+  "name": "@kyuri/progressive-svg-spatial-indexing",
+  "version": "0.1.0",
+  "description": "Progressive SVG spatial index synchronizer for broad-phase queries.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
+  },
+  "keywords": [
+    "svg",
+    "spatial-index",
+    "mutation-observer",
+    "typescript"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/rbush": "^4.0.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "rbush": "^4.0.1"
+  }
+}
