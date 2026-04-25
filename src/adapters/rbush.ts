@@ -34,6 +34,7 @@ export class RbushSpatialIndexAdapter<TItem>
   }
 
   batchUpdate(handle: RbushIndexHandle<TItem>, batch: BatchUpdate<TItem>): RbushIndexHandle<TItem> {
+    // RBush removes by object identity, so we rebuild a key -> entry map from the current tree before editing it in place.
     const entriesByKey = new Map<string, RbushEntry<TItem>>();
     for (const entry of handle.all()) {
       entriesByKey.set(entry.key, entry);
@@ -49,6 +50,7 @@ export class RbushSpatialIndexAdapter<TItem>
       entriesByKey.delete(key);
     }
 
+    // Upsert means "replace by key": remove the old entry first, then insert the new one.
     for (const item of batch.upserts) {
       const nextEntry = this.toEntry(item);
       const existingEntry = entriesByKey.get(nextEntry.key);
@@ -91,6 +93,7 @@ export function createRbushSpatialIndexAdapter<TItem>(
 }
 
 function defaultGetBounds<TItem>(item: TItem): SpatialIndexAabbLike {
+  // This fallback keeps the adapter ergonomic for already-flattened items, while still allowing nested bbox via getBounds.
   if (
     typeof item === 'object' &&
     item !== null &&

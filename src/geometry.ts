@@ -22,6 +22,7 @@ interface Point {
 }
 
 export function toWorldAabb(box: BBoxLike, matrix: MatrixLike): WorldAabb {
+  // A rotated or skewed box is no longer axis-aligned, so we transform all four corners and re-wrap them.
   const points = [
     transformPoint(box.x, box.y, matrix),
     transformPoint(box.x + box.width, box.y, matrix),
@@ -38,6 +39,7 @@ export function toWorldAabb(box: BBoxLike, matrix: MatrixLike): WorldAabb {
 }
 
 export function areAabbsEqual(left: WorldAabb, right: WorldAabb, epsilon: number): boolean {
+  // epsilon avoids churn from tiny float differences that are irrelevant to broad-phase queries.
   return (
     Math.abs(left.minX - right.minX) <= epsilon &&
     Math.abs(left.minY - right.minY) <= epsilon &&

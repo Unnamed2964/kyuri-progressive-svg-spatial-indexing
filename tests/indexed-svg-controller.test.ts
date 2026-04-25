@@ -44,6 +44,30 @@ describe('IndexedSvgController', () => {
     expect(results[0]?.bbox).toEqual({ minX: 100, minY: 200, maxX: 110, maxY: 220 });
   });
 
+  it('only indexes direct children inside the attached layer', () => {
+    const svg = createSvgRoot();
+    const layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    const trackedRect = createRect('node-a');
+    const siblingRect = createRect('node-b');
+    const nestedRect = createRect('node-c');
+    const nestedGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    stubGeometry(trackedRect, { x: 0, y: 0, width: 10, height: 10 }, { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+    stubGeometry(siblingRect, { x: 20, y: 0, width: 10, height: 10 }, { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+    stubGeometry(nestedRect, { x: 40, y: 0, width: 10, height: 10 }, { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+
+    nestedGroup.append(nestedRect);
+    layer.append(trackedRect);
+    layer.append(nestedGroup);
+    svg.append(layer, siblingRect);
+
+    const controller = createController();
+    controller.attach(layer);
+    controller.flush();
+
+    const results = controller.queryRect({ minX: -1, minY: -1, maxX: 60, maxY: 20 });
+    expect(results.map((item) => item.key)).toEqual(['node-a']);
+  });
+
   it('removes elements without waiting for a measurement frame when subtree nodes are removed', async () => {
     const svg = createSvgRoot();
     const rect = createRect('node-a');
@@ -81,12 +105,13 @@ describe('IndexedSvgController', () => {
     expect(results[0]?.bbox.minX).toBe(50);
   });
 
-  it('propagates ancestor transform changes to tracked descendants', async () => {
+  it('re-measures a tracked direct child group when nested descendants change', async () => {
     const svg = createSvgRoot();
     const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    group.setAttribute('id', 'node-a');
     const rect = createRect('node-a');
     let groupOffset = 0;
-    stubDynamicGeometry(rect, () => ({ x: 0, y: 0, width: 10, height: 10 }), () => ({ a: 1, b: 0, c: 0, d: 1, e: groupOffset, f: 0 }));
+    stubDynamicGeometry(group as unknown as SVGGraphicsElement, () => ({ x: 0, y: 0, width: 10, height: 10 }), () => ({ a: 1, b: 0, c: 0, d: 1, e: groupOffset, f: 0 }));
     group.append(rect);
     svg.append(group);
 
@@ -96,7 +121,7 @@ describe('IndexedSvgController', () => {
     requestFrame.flush();
 
     groupOffset = 75;
-    group.setAttribute('transform', 'translate(75,0)');
+    rect.setAttribute('x', '75');
     await Promise.resolve();
     requestFrame.flush();
 

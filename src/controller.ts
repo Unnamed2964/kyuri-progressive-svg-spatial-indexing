@@ -22,11 +22,20 @@ interface TrackedRecord<TMetadata> {
 
 type GraphicsElementLike = SVGElement & Pick<SVGGraphicsElement, 'getBBox' | 'getCTM'>;
 
+/**
+ * Controller configuration.
+ *
+ * Contract: attach() must receive the dedicated index layer, and each tracked graphic must be a
+ * direct child of that layer.
+ */
 export interface IndexedSvgControllerOptions<TMetadata, THandle> {
   adapter: SpatialIndexAdapter<SpatialIndexItem<TMetadata>, THandle>;
-  matcher?: (element: Element) => boolean;
   keyExtractor?: (element: SVGGraphicsElement) => string | null;
   metadataExtractor?: (element: SVGGraphicsElement) => TMetadata;
+  /**
+   * Attribute names that trigger automatic invalidation.
+   * Include any attributes that can affect key extraction, bbox measurement, or metadata.
+   */
   observedAttributes?: string[];
   epsilon?: number;
   autoFlush?: boolean;
@@ -59,7 +68,6 @@ const DEFAULT_OBSERVED_ATTRIBUTES = [
 
 export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
   private readonly adapter: SpatialIndexAdapter<SpatialIndexItem<TMetadata>, THandle>;
-  private readonly matcher: (element: Element) => boolean;
   private readonly keyExtractor: (element: SVGGraphicsElement) => string | null;
   private readonly metadataExtractor: (element: SVGGraphicsElement) => TMetadata;
   private readonly observedAttributes: string[];
@@ -68,11 +76,12 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
   private readonly requestFrame: (callback: FrameRequestCallback) => number;
   private readonly cancelFrame: (handle: number) => void;
   private readonly listeners = new Map<EventName, Set<Listener<never>>>();
+  // These three maps are the core cache: element -> record, key -> element, and pending work for the next flush.
   private readonly recordsByElement = new Map<SVGGraphicsElement, TrackedRecord<TMetadata>>();
   private readonly elementByKey = new Map<string, SVGGraphicsElement>();
   private readonly dirtyElements = new Map<SVGGraphicsElement, DirtyReason>();
 
-  private svgRoot: SVGSVGElement | null = null;
+  private rootElement: Element | null = null;
   private observer: MutationObserver | null = null;
   private rafHandle: number | null = null;
   private isPaused = false;
@@ -81,7 +90,6 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
 
   constructor(options: IndexedSvgControllerOptions<TMetadata, THandle>) {
     this.adapter = options.adapter;
-    this.matcher = options.matcher ?? defaultMatcher;
     this.keyExtractor = options.keyExtractor ?? ((element) => element.id || null);
     this.metadataExtractor = options.metadataExtractor ?? (() => undefined as TMetadata);
     this.observedAttributes = [...(options.observedAttributes ?? DEFAULT_OBSERVED_ATTRIBUTES)];
@@ -96,16 +104,16 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     this.handle = this.adapter.create();
   }
 
-  attach(svgRoot: SVGSVGElement): void {
-    if (this.svgRoot === svgRoot && this.observer) {
+  attach(rootElement: Element): void {
+    if (this.rootElement === rootElement && this.observer) {
       return;
     }
 
     this.detach();
-    this.svgRoot = svgRoot;
+    this.rootElement = rootElement;
     this.initialBuildPending = true;
     this.observer = new MutationObserver((mutations) => this.handleMutations(mutations));
-    this.observer.observe(svgRoot, {
+    this.observer.observe(rootElement, {
       subtree: true,
       childList: true,
       attributes: true,
@@ -113,7 +121,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
       attributeFilter: this.observedAttributes
     });
 
-    this.scanSubtree(svgRoot);
+    this.scanLayerChildren(rootElement);
     this.initialBuildPending = false;
     this.scheduleFlush();
   }
@@ -126,7 +134,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
 
     this.observer?.disconnect();
     this.observer = null;
-    this.svgRoot = null;
+    this.rootElement = null;
     this.isPaused = false;
     this.initialBuildPending = false;
     this.dirtyElements.clear();
@@ -149,8 +157,8 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     this.markDirty(element, 'measure');
   }
 
-  invalidateSubtree(root: Element): void {
-    this.visitMatchingGraphics(root, (element) => this.markDirty(element, 'measure'));
+  invalidateChildren(root: Element): void {
+    this.visitDirectGraphicsChildren(root, (element) => this.markDirty(element, 'measure'));
   }
 
   invalidateAll(): void {
@@ -171,10 +179,12 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     const upserts = new Map<string, SpatialIndexItem<TMetadata>>();
     let measured = 0;
 
+    // A flush reconciles the dirty queue with the actual DOM, then emits one batch into the index adapter.
     for (const [element] of this.dirtyElements) {
       const currentRecord = this.recordsByElement.get(element);
 
-      if (!this.svgRoot?.contains(element) || !this.matchesElement(element)) {
+      // Elements can fall out of scope because they were removed from the layer or are no longer direct children.
+      if (!this.isTrackedLayerChild(element)) {
         if (currentRecord) {
           removes.add(currentRecord.key);
           this.recordsByElement.delete(element);
@@ -205,6 +215,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
       }
 
       try {
+        // Measurement happens as late as possible so multiple mutations in one frame collapse into one read.
         const bbox = this.measureWorldAabb(element);
         const metadata = this.metadataExtractor(element);
         const nextRecord: TrackedRecord<TMetadata> = {
@@ -251,9 +262,10 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     const liveItems: SpatialIndexItem<TMetadata>[] = [];
     const staleKeys = new Set<string>();
 
+    // Queries are also a safety net: if the DOM changed before observer cleanup ran, stale items are filtered out here.
     for (const item of items) {
       const currentKey = this.keyExtractor(item.element);
-      if (!this.svgRoot?.contains(item.element) || !this.matchesElement(item.element) || currentKey !== item.key) {
+      if (!this.isTrackedLayerChild(item.element) || currentKey !== item.key) {
         staleKeys.add(item.key);
         this.recordsByElement.delete(item.element);
         this.elementByKey.delete(item.key);
@@ -278,7 +290,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
       trackedCount: this.recordsByElement.size,
       queuedCount: this.dirtyElements.size,
       currentHandle: this.handle,
-      isAttached: this.svgRoot !== null,
+      isAttached: this.rootElement !== null,
       isPaused: this.isPaused,
       initialBuildPending: this.initialBuildPending
     };
@@ -311,36 +323,40 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
   }
 
   private handleMutations(mutations: MutationRecord[]): void {
+    // MutationObserver tells us which tracked layer children may have changed; actual measurement waits until flush.
     for (const mutation of mutations) {
       if (mutation.type === 'childList') {
-        for (const node of mutation.removedNodes) {
-          if (node instanceof Element) {
-            this.removeTrackedSubtree(node);
+        if (mutation.target === this.rootElement) {
+          for (const node of mutation.removedNodes) {
+            if (node instanceof Element) {
+              this.removeTrackedLayerChild(node);
+            }
           }
-        }
 
-        for (const node of mutation.addedNodes) {
-          if (node instanceof Element) {
-            this.scanSubtree(node);
+          for (const node of mutation.addedNodes) {
+            if (node instanceof Element) {
+              this.scanLayerChild(node);
+            }
+          }
+        } else {
+          const owner = this.getTrackedLayerChildForNode(mutation.target);
+          if (owner) {
+            this.markDirty(owner, 'measure');
           }
         }
       }
 
       if (mutation.type === 'attributes') {
-        const target = mutation.target;
-        if (isGraphicsElement(target)) {
-          this.markDirty(target, 'measure');
-        }
-
-        if (target instanceof Element) {
-          this.invalidateSubtree(target);
+        const owner = this.getTrackedLayerChildForNode(mutation.target);
+        if (owner) {
+          this.markDirty(owner, 'measure');
         }
       }
 
       if (mutation.type === 'characterData') {
-        const parentElement = mutation.target.parentElement;
-        if (parentElement) {
-          this.invalidateSubtree(parentElement);
+        const owner = this.getTrackedLayerChildForNode(mutation.target);
+        if (owner) {
+          this.markDirty(owner, 'measure');
         }
       }
     }
@@ -348,20 +364,20 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     this.scheduleFlush();
   }
 
-  private scanSubtree(root: Element): void {
-    this.visitMatchingGraphics(root, (element) => this.markDirty(element, 'structure'));
+  private scanLayerChildren(root: Element): void {
+    this.visitDirectGraphicsChildren(root, (element) => this.markDirty(element, 'structure'));
   }
 
-  private removeTrackedSubtree(root: Element): void {
-    if (root instanceof SVGGraphicsElement) {
-      this.removeTrackedElement(root);
+  private scanLayerChild(node: Element): void {
+    if (this.isDirectGraphicsChild(node)) {
+      this.markDirty(node, 'structure');
     }
+  }
 
-    this.visitMatchingGraphics(root, (element) => {
-      if (element !== root) {
-        this.removeTrackedElement(element);
-      }
-    });
+  private removeTrackedLayerChild(node: Element): void {
+    if (this.isDirectGraphicsChild(node)) {
+      this.removeTrackedElement(node);
+    }
   }
 
   private removeTrackedElement(element: SVGGraphicsElement): void {
@@ -371,6 +387,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
       return;
     }
 
+    // Removals do not need layout reads, so they can be pushed into the adapter immediately.
     this.recordsByElement.delete(element);
     this.elementByKey.delete(record.key);
     this.handle = this.adapter.batchUpdate(this.handle, {
@@ -382,6 +399,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
 
   private markDirty(element: SVGGraphicsElement, reason: DirtyReason): void {
     const previous = this.dirtyElements.get(element);
+    // 'structure' means a stronger reason than a plain re-measure, so we keep it if it was already set.
     if (previous === 'structure') {
       return;
     }
@@ -391,6 +409,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
   }
 
   private scheduleFlush(): void {
+    // At most one frame callback is queued at a time; extra mutations just add more elements into dirtyElements.
     if (!this.autoFlush || this.isPaused || this.rafHandle !== null || this.dirtyElements.size === 0) {
       return;
     }
@@ -401,20 +420,33 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     });
   }
 
-  private visitMatchingGraphics(root: Element, visitor: (element: SVGGraphicsElement) => void): void {
-    if (isGraphicsElement(root) && this.matchesElement(root)) {
-      visitor(root);
-    }
-
-    for (const element of root.querySelectorAll('*')) {
-      if (isGraphicsElement(element) && this.matchesElement(element)) {
-        visitor(element);
+  private visitDirectGraphicsChildren(root: Element, visitor: (element: SVGGraphicsElement) => void): void {
+    for (const child of root.children) {
+      if (this.isDirectGraphicsChild(child)) {
+        visitor(child);
       }
     }
   }
 
-  private matchesElement(element: Element): element is SVGGraphicsElement {
-    return isGraphicsElement(element) && this.matcher(element);
+  private isDirectGraphicsChild(element: Element): element is SVGGraphicsElement {
+    return element.parentElement === this.rootElement && isGraphicsElement(element);
+  }
+
+  private isTrackedLayerChild(element: SVGGraphicsElement): boolean {
+    return element.parentElement === this.rootElement;
+  }
+
+  private getTrackedLayerChildForNode(node: Node | null): SVGGraphicsElement | null {
+    let current: Node | null = node;
+
+    while (current && current !== this.rootElement) {
+      if (current instanceof Element && this.isDirectGraphicsChild(current)) {
+        return current;
+      }
+      current = current.parentNode;
+    }
+
+    return null;
   }
 
   private measureWorldAabb(element: SVGGraphicsElement): WorldAabb {
@@ -423,13 +455,9 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     if (!matrix) {
       throw new Error(`Unable to measure CTM for element: ${element.id || element.tagName}`);
     }
-
+    // We index in one shared SVG coordinate space, so the local bbox must be transformed before insertion.
     return toWorldAabb(localBBox, matrix);
   }
-}
-
-function defaultMatcher(element: Element): boolean {
-  return isGraphicsElement(element) && Boolean(element.id);
 }
 
 function isGraphicsElement(element: Node | null): element is SVGGraphicsElement {
