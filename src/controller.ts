@@ -1,5 +1,5 @@
 import type { SpatialIndexAdapter } from './adapter.js';
-import { areAabbsEqual, toWorldAabb } from './geometry.js';
+import { areAabbsEqual, toAabbInCoordinateSpace } from './geometry.js';
 import type {
   FlushStats,
   IndexedSvgEvents,
@@ -21,6 +21,9 @@ interface TrackedRecord<TMetadata> {
 }
 
 type GraphicsElementLike = SVGElement & Pick<SVGGraphicsElement, 'getBBox' | 'getCTM'>;
+type CoordinateReferenceElement = SVGElement & {
+  getCTM(): DOMMatrix | SVGMatrix | null;
+};
 
 /**
  * Controller configuration.
@@ -32,6 +35,11 @@ export interface IndexedSvgControllerOptions<TMetadata, THandle> {
   adapter: SpatialIndexAdapter<SpatialIndexItem<TMetadata>, THandle>;
   keyExtractor?: (element: SVGGraphicsElement) => string | null;
   metadataExtractor?: (element: SVGGraphicsElement) => TMetadata;
+  /**
+   * Optional reference coordinate space. When provided, indexed bbox values and queryRect inputs are
+   * interpreted in this element's local SVG coordinate system rather than the global SVG world space.
+   */
+  coordinateReferenceElement?: CoordinateReferenceElement | null;
   /**
    * Attribute names that trigger automatic invalidation.
    * Include any attributes that can affect key extraction, bbox measurement, or metadata.
@@ -70,6 +78,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
   private readonly adapter: SpatialIndexAdapter<SpatialIndexItem<TMetadata>, THandle>;
   private readonly keyExtractor: (element: SVGGraphicsElement) => string | null;
   private readonly metadataExtractor: (element: SVGGraphicsElement) => TMetadata;
+  private readonly coordinateReferenceElement: CoordinateReferenceElement | null;
   private readonly observedAttributes: string[];
   private readonly epsilon: number;
   private readonly autoFlush: boolean;
@@ -92,6 +101,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     this.adapter = options.adapter;
     this.keyExtractor = options.keyExtractor ?? ((element) => element.id || null);
     this.metadataExtractor = options.metadataExtractor ?? (() => undefined as TMetadata);
+    this.coordinateReferenceElement = options.coordinateReferenceElement ?? null;
     this.observedAttributes = [...(options.observedAttributes ?? DEFAULT_OBSERVED_ATTRIBUTES)];
     this.epsilon = options.epsilon ?? 0;
     this.autoFlush = options.autoFlush ?? true;
@@ -216,7 +226,7 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
 
       try {
         // Measurement happens as late as possible so multiple mutations in one frame collapse into one read.
-        const bbox = this.measureWorldAabb(element);
+        const bbox = this.measureIndexedAabb(element);
         const metadata = this.metadataExtractor(element);
         const nextRecord: TrackedRecord<TMetadata> = {
           key: nextKey,
@@ -449,14 +459,20 @@ export class IndexedSvgController<TMetadata = unknown, THandle = unknown> {
     return null;
   }
 
-  private measureWorldAabb(element: SVGGraphicsElement): WorldAabb {
+  private measureIndexedAabb(element: SVGGraphicsElement): WorldAabb {
     const localBBox = element.getBBox();
     const matrix = element.getCTM();
     if (!matrix) {
       throw new Error(`Unable to measure CTM for element: ${element.id || element.tagName}`);
     }
-    // We index in one shared SVG coordinate space, so the local bbox must be transformed before insertion.
-    return toWorldAabb(localBBox, matrix);
+
+    const referenceMatrix = this.coordinateReferenceElement?.getCTM() ?? null;
+    if (this.coordinateReferenceElement && !referenceMatrix) {
+      throw new Error('Unable to measure CTM for coordinate reference element.');
+    }
+
+    // We index in one shared coordinate space: world by default, or a caller-selected SVG reference element.
+    return toAabbInCoordinateSpace(localBBox, matrix, referenceMatrix ?? undefined);
   }
 }
 

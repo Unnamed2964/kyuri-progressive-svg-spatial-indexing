@@ -44,6 +44,24 @@ describe('IndexedSvgController', () => {
     expect(results[0]?.bbox).toEqual({ minX: 100, minY: 200, maxX: 110, maxY: 220 });
   });
 
+  it('can index in a selected ancestor coordinate system instead of world space', () => {
+    const svg = createSvgRoot();
+    const reference = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    const rect = createRect('node-a');
+    stubMatrixOnly(reference as unknown as SVGGraphicsElement, { a: 1, b: 0, c: 0, d: 1, e: 100, f: 200 });
+    stubGeometry(rect, { x: 0, y: 0, width: 10, height: 20 }, { a: 1, b: 0, c: 0, d: 1, e: 110, f: 220 });
+    reference.append(rect);
+    svg.append(reference);
+
+    const controller = createController({ coordinateReferenceElement: reference });
+    controller.attach(reference);
+    controller.flush();
+
+    const results = controller.queryRect({ minX: 5, minY: 15, maxX: 25, maxY: 45 });
+    expect(results).toHaveLength(1);
+    expect(results[0]?.bbox).toEqual({ minX: 10, minY: 20, maxX: 20, maxY: 40 });
+  });
+
   it('only indexes direct children inside the attached layer', () => {
     const svg = createSvgRoot();
     const layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -213,6 +231,19 @@ function stubDynamicGeometry(
         f: matrix.f ?? 0
       };
     }
+  });
+}
+
+function stubMatrixOnly(element: SVGGraphicsElement, matrix: DOMMatrixInit): void {
+  Object.defineProperty(element, 'getCTM', {
+    value: () => ({
+      a: matrix.a ?? 1,
+      b: matrix.b ?? 0,
+      c: matrix.c ?? 0,
+      d: matrix.d ?? 1,
+      e: matrix.e ?? 0,
+      f: matrix.f ?? 0
+    })
   });
 }
 

@@ -11,7 +11,7 @@
 ## 当前范围
 
 - 监听 SVG 子树中的新增、删除、属性变化与文本变化
-- 维护命中元素的世界坐标 AABB
+- 维护命中元素在索引坐标系中的 AABB，默认是世界坐标，也可以指定某个参考元素的局部坐标系
 - 以 requestAnimationFrame 为批处理边界进行测量和批量 upsert/remove
 - 将查询请求转发给外部提供的空间索引适配器
 - 提供手动失效与立即 flush 能力
@@ -28,6 +28,28 @@
 ## Layer 约定
 
 推荐把需要空间索引的图元集中渲染在一个单独的 SVG layer/group 中，并把控制器直接 attach 到这个 layer。这样控制器只会观察和扫描该 layer 的第一层子元素，而不会遍历同一个 svg 中的其他 UI、装饰或编辑辅助层。
+
+## 坐标系约定
+
+默认情况下，控制器会把每个第一层图元测量到统一的 SVG world 坐标系后再写入空间索引，因此 `queryRect(...)` 也应该传入 world 坐标。
+
+如果希望以某个参考元素 B 的局部坐标系作为索引坐标系，可以在构造控制器时传入 `coordinateReferenceElement: B`。此时：
+
+- `bbox` 会落在 B 的局部坐标系中
+- `queryRect(...)` 也必须传入 B 坐标系下的查询窗口
+- 这适合把索引直接绑定到某个 viewport/group 的内部坐标，而不是整个 svg 的 world 坐标
+
+例如：
+
+```ts
+const controller = new IndexedSvgController({
+	adapter,
+	coordinateReferenceElement: viewportGroup
+});
+
+controller.attach(indexLayer);
+controller.flush();
+```
 
 ## 内置适配器
 

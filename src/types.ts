@@ -8,6 +8,11 @@ export interface WorldAabb {
 export interface SpatialIndexItem<TMeta = unknown> {
   key: string;
   element: SVGGraphicsElement;
+  /**
+   * Axis-aligned bounds in the controller's index coordinate space.
+   * By default this is SVG world space; when coordinateReferenceElement is set, it becomes that
+   * element's local coordinate system.
+   */
   bbox: WorldAabb;
   metadata: TMeta;
 }
